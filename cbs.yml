@@ -1,0 +1,28 @@
+version: 1
+run:
+  source:
+    url: https://www.cbs.nl/-/media/cbsvooruwbedrijf/international-trade-in-goods/commoditycodes-2025.xlsx
+  destination:
+    type: ducklake
+    ducklake:
+      ducklake_name: ducklake
+      catalog: sqlite:///ducklake.sqlitedb
+      storage: ./ducklake/
+    dataset: cbs2025
+    duckdb_file: ./cbs.duckdb
+  options:
+    infer_if_missing: true
+outputs:
+  raw:
+    enabled: true
+    table: raw_ingest
+  normalized:
+    enabled: true
+    tables:
+    - commoditycodes_2025
+collections:
+  commoditycodes_2025:
+    enabled: true
+    sheet: CN2025
+    pk:
+      prefer: []
