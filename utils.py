@@ -107,10 +107,23 @@ def should_skip_source(
         with pipeline.sql_client() as client:
             if check_type == "preliminary":
                 result = client.execute_sql(
-                    "SELECT last_preliminary_checksum, last_mapping_checksum "
-                    "FROM sourcesmetadata "
-                    "WHERE source_name = %s AND dataset = %s",
-                    source_name, dataset
+                    """
+select (
+  SELECT last_preliminary_checksum
+  from sourcesmetadata
+  WHERE source_name = %s AND dataset = %s and last_preliminary_checksum is not null
+  order by last_ingest_timestamp desc
+  limit 1
+) as last_preliminary_checksum,
+(
+  SELECT last_mapping_checksum
+  from sourcesmetadata
+  WHERE source_name = %s AND dataset = %s and last_mapping_checksum is not null
+  order by last_ingest_timestamp desc
+  limit 1
+) as last_mapping_checksum
+ """,
+                    source_name, dataset, source_name, dataset
                 )
                 if result is not None:
                     rows = list(result)
@@ -123,10 +136,23 @@ def should_skip_source(
                             return True
             else:
                 result = client.execute_sql(
-                    "SELECT last_source_checksum, last_mapping_checksum "
-                    "FROM sourcesmetadata "
-                    "WHERE source_name = %s AND dataset = %s",
-                    source_name, dataset
+                    """
+select (
+  SELECT last_source_checksum
+  from sourcesmetadata
+  WHERE source_name = %s AND dataset = %s and last_source_checksum is not null
+  order by last_ingest_timestamp desc
+  limit 1
+) as last_source_checksum,
+(
+  SELECT last_mapping_checksum
+  from sourcesmetadata
+  WHERE source_name = %s AND dataset = %s and last_mapping_checksum is not null
+  order by last_ingest_timestamp desc
+  limit 1
+) as last_mapping_checksum
+ """,
+                    source_name, dataset, source_name, dataset
                 )
                 if result is not None:
                     rows = list(result)
@@ -134,11 +160,11 @@ def should_skip_source(
                         stored_exact = rows[0][0]
                         stored_mapping = rows[0][1]
                         logger.info(f"  Exact check: stored={stored_exact[:16] if stored_exact else None}..., new={new_checksum[:16] if new_checksum else None}..., stored_mapping={stored_mapping[:16] if stored_mapping else None}..., new_mapping={new_mapping_checksum[:16] if new_mapping_checksum else None}...")
-                        if stored_exact == new_checksum and stored_mapping == new_mapping_checksum:
+                        if stored_exact == new_checksum and stored_mapping is not None and stored_mapping == new_mapping_checksum:
                             logger.debug(f"Exact and mapping checksums match")
                             return True
     except Exception as e:
-        logger.debug(f"Could not check sourcesmetadata: {e}")
+        logger.warning(f"Could not check sourcesmetadata: {e}")
     
     return False
 
