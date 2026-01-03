@@ -64,12 +64,173 @@ def rebuild_xml_mapping_from_yaml(source_name: str, xml_infer: Dict[str, Any]) -
     return XmlMapping(version=1, root=root, source_name=source_name, collections=cols)
 
 
+def generate_new_mapping_template(mapping_path: str) -> None:
+    mapping_name = os.path.splitext(os.path.basename(mapping_path))[0]
+    duckdb_file = f"./{mapping_name}.duckdb"
+    mapping_filename = os.path.basename(mapping_path)
+
+    template = """# ingest2duck Mapping Template
+# Generated automatically by --newmapping option
+#
+# Usage:
+#   python ingest2duck.py --mapping """ + mapping_filename + """
+
+# ============================================================================
+# VERSION
+# ============================================================================
+version: 1
+
+# ============================================================================
+# SOURCES - Data Bron Definities
+# ============================================================================
+sources:
+  # Voorbeeld 1: XLSX Bestand
+  # - name: mijn_dataset
+  #   url: https://example.com/data.xlsx
+  #   # collections:
+  #   #   commoditycodes:
+  #   #     sheet: CN2025              # Specifiek tabblad naam
+  #   #     use_first_sheet: true     # Of gebruik eerste tabblad
+
+  # Voorbeeld 2: CSV Bestand
+  # - name: sales_data
+  #   url: https://example.com/sales.csv
+  #   format: csv
+  #   delimiter: ";"                  # Delimiter: comma (,), semicolon (;), tab (\t)
+  #   encoding: utf-8
+
+  # Voorbeeld 3: JSON Bestand
+  # - name: api_data
+  #   url: https://api.example.com/data.json
+  #   records_path: results.items     # Dotted pad naar records (optioneel)
+
+  # Voorbeeld 4: XML Bestand
+  # - name: xml_data
+  #   url: https://example.com/data.xml
+
+  # Voorbeeld 5: Lokaal Bestand
+  # - name: local_file
+  #   file: ./data/myfile.xlsx
+
+  # Voorbeeld 6: URL met Datum Placeholder
+  # - name: daily_export
+  #   url: https://example.com/export_{today:%Y%m%d}.xlsx
+  #   # Datum placeholders: {today}, {yesterday}, {tomorrow}, {now}
+  #   # Format strings: %Y (jaar), %m (maand), %d (dag), %H:%M:%S (tijd)
+
+# ============================================================================
+# DESTINATION - Waar wordt de data opgeslagen
+# ============================================================================
+destination:
+  # Type: 'duckdb' (lokaal) of 'ducklake' (productie)
+  # Start met duckdb voor testen, schakel later over naar ducklake
+  type: duckdb
+
+  # Dataset naam (wordt gebruikt als schema naam)
+  dataset: """ + mapping_name + """
+
+  # DuckDB specifieke instellingen
+  duckdb_file: """ + duckdb_file + """
+
+  # DuckLake specifieke instellingen (alleen als type: ducklake)
+  # ducklake:
+  #   ducklake_name: ducklake
+  #   catalog: sqlite:///ducklake.sqlitedb
+  #   storage: ./ducklake/
+  #   replace_strategy: truncate-and-insert  # Opties: truncate-and-insert, insert-from-staging, staging-optimized
+
+# ============================================================================
+# OPTIONS - Globale Opties
+# ============================================================================
+options:
+  # Automatisch mappings infereren als ze ontbreken (aanbevolen voor eerste run)
+  infer_if_missing: true
+
+  # Globale write disposition (kan per collectie worden overschreven)
+  # append: voeg nieuwe data toe (default)
+  # replace: vervang de volledige tabel
+  # merge: update bestaande en voeg nieuwe toe (vereist PK)
+  # skip: sla deze tabel over
+  write_disposition: append
+
+# ============================================================================
+# OUTPUTS - Output Configuratie
+# ============================================================================
+outputs:
+  raw:
+    # Raw tabel: alle data in één tabel met metadata (handig voor debug)
+    enabled: true
+    table: raw_ingest
+
+  normalized:
+    # Genormaliseerd: per collectie een aparte tabel met platte kolommen
+    enabled: true
+    tables: []  # Wordt automatisch bijgewerkt na eerste run
+
+# ============================================================================
+# COLLECTIONS - Tabulaire Mappings (CSV/XLSX/JSON)
+# ============================================================================
+# collections:
+#   # Naam moet beginnen met source_name (bijv. mijn_dataset_data)
+#   mijn_dataset_data:
+#     enabled: true                      # Collectie verwerken
+#     pk:
+#       prefer:                          # Voorkeursvolgorde voor primaire sleutel
+#         - id
+#         - ID
+#         - code
+#         - Code
+#         - uuid
+#     write_disposition: append          # Overschrijft globale write_disposition
+#     # sheet: Sheet1                     # XLSX: specifiek tabblad
+#     # use_first_sheet: false            # XLSX: gebruik eerste tabblad
+#     # path: $.data.items                # JSON: dotted pad naar records
+
+# ============================================================================
+# XML_INFER - XML Specifieke Mappings
+# ============================================================================
+# xml_infer:
+#   bronnaam:
+#     root: IXF                           # Root element naam
+#     collections:
+#       tabelnaam:
+#         enabled: true
+#         path: /IXF/Units/Unit           # XPath naar entities
+#         pk:
+#           prefer:
+#             - Code
+#             - '@id'
+#             - id
+#         parent: null                    # Parent collectie naam (voor hiërarchie)
+#         parent_fk: null                 # Foreign key kolom naam (meestal _parent_pk)
+"""
+    
+    with open(mapping_path, "w", encoding="utf-8") as f:
+        f.write(template)
+    
+    logger.info("✓ Created new mapping template: " + mapping_path)
+    logger.info("✓ DuckDB destination: " + duckdb_file)
+    logger.info("")
+    logger.info("Next steps:")
+    logger.info("  1. Edit " + os.path.basename(mapping_path) + " to add your source(s)")
+    logger.info("  2. Run: python ingest2duck.py --mapping " + os.path.basename(mapping_path))
+    logger.info("  3. Adjust mapping based on inferred results")
+    logger.info("  4. Change destination.type to 'ducklake' for production")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
 
     ap.add_argument(
+        "--newmapping",
+        dest="newmapping",
+        default=None,
+        help="Create a new mapping template file",
+    )
+
+    ap.add_argument(
         "--mapping",
-        required=True,
+        default=None,
         help="Mapping YAML for run config + inferred collections",
     )
 
@@ -130,6 +291,18 @@ def main() -> None:
     )
 
     args = ap.parse_args()
+
+    if args.newmapping:
+        if os.path.exists(args.newmapping):
+            logger.error("Mapping file already exists: " + args.newmapping)
+            logger.info("Delete the existing file first to create a new template")
+            return
+        
+        generate_new_mapping_template(args.newmapping)
+        return
+    
+    if not args.mapping:
+        ap.error("--mapping is required (use --newmapping <file> to create a new template)")
 
     logger.info(f"Starting ingest2duck with mapping file: {args.mapping}")
 

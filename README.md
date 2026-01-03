@@ -14,6 +14,10 @@ Data ingestion tool for loading XML, JSON, CSV, and XLSX files into DuckDB or Du
 ## Usage
 
 ```bash
+# Create a new mapping template
+python ingest2duck.py --newmapping <config.yml>
+
+# Run with existing mapping
 python ingest2duck.py --mapping <config.yml> [options]
 ```
 
@@ -21,6 +25,7 @@ python ingest2duck.py --mapping <config.yml> [options]
 
 ### Core Options
 
+- `--newmapping PATH`: Create a new mapping template file with all options as comments
 - `--mapping PATH` (required): Mapping YAML for run config + inferred collections
 - `--dataset NAME`: Override destination.dataset
 - `--force`: Force reprocessing of all sources, ignoring checksums

@@ -6,6 +6,10 @@ This file provides guidance for agentic coding assistants working on the ingest2
 
 **Run the main CLI:**
 ```bash
+# Create a new mapping template
+python ingest2duck.py --newmapping <path>
+
+# Run with existing mapping
 python ingest2duck.py --mapping <path> [options]
 ```
 
