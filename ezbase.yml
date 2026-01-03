@@ -1,0 +1,60 @@
+version: 1
+sources:
+- name: EZ-baseClassificationNL
+  url: https://file.ez-base.nl/Reports/Classification/EZ-baseClassificationNL.xlsx
+- name: EZ-baseClassificationEN
+  url: https://file.ez-base.nl/Reports/Classification/EZ-baseClassificationEN.xlsx
+- name: EZ-baseClassificationDE
+  url: https://file.ez-base.nl/Reports/Classification/EZ-baseClassificationDE.xlsx
+- name: EZ-baseClassificationFR
+  url: https://file.ez-base.nl/Reports/Classification/EZ-baseClassificationFR.xlsx
+destination:
+  type: ducklake
+  ducklake:
+    ducklake_name: ducklake
+    catalog: sqlite:///ducklake.sqlitedb
+    storage: ./ducklake/
+    replace_strategy: truncate-and-insert
+  dataset: ezbasetaxonomy
+  duckdb_file: ./ezbase.duckdb
+options:
+  infer_if_missing: true
+  write_disposition: append
+outputs:
+  raw:
+    enabled: true
+    table: raw_ingest
+  normalized:
+    enabled: true
+    tables: []
+collections:
+  mijn_dataset_data:
+    enabled: true
+    sheet: sheet1
+    use_first_sheet: false
+    pk:
+      prefer: []
+  EZ-baseClassificationNL_data:
+    enabled: true
+    sheet: sheet1
+    use_first_sheet: false
+    pk:
+      prefer: []
+  EZ-baseClassificationEN_data:
+    enabled: true
+    sheet: sheet1
+    use_first_sheet: false
+    pk:
+      prefer: []
+  EZ-baseClassificationDE_data:
+    enabled: true
+    sheet: sheet1
+    use_first_sheet: false
+    pk:
+      prefer: []
+  EZ-baseClassificationFR_data:
+    enabled: true
+    sheet: sheet1
+    use_first_sheet: false
+    pk:
+      prefer: []
