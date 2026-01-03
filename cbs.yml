@@ -1,17 +1,25 @@
 version: 1
-run:
-  source:
-    url: https://www.cbs.nl/-/media/cbsvooruwbedrijf/international-trade-in-goods/commoditycodes-2025.xlsx
-  destination:
-    type: ducklake
-    ducklake:
-      ducklake_name: ducklake
-      catalog: sqlite:///ducklake.sqlitedb
-      storage: ./ducklake/
-    dataset: cbs2025
-    duckdb_file: ./cbs.duckdb
-  options:
-    infer_if_missing: true
+sources:
+- name: cbs2025
+  url: https://www.cbs.nl/-/media/cbsvooruwbedrijf/international-trade-in-goods/commoditycodes-2025.xlsx
+  collections:
+    commoditycodes:
+      use_first_sheet: true
+- name: cbs2026
+  url: https://www.cbs.nl/-/media/cbsvooruwbedrijf/international-trade-in-goods/commoditycodes-2026.xlsx
+  collections:
+    commoditycodes:
+      use_first_sheet: true
+destination:
+  type: ducklake
+  ducklake:
+    ducklake_name: ducklake
+    catalog: sqlite:///ducklake.sqlitedb
+    storage: ./ducklake/
+    replace_strategy: truncate-and-insert
+  dataset: cbs_all
+options:
+  infer_if_missing: true
 outputs:
   raw:
     enabled: true
@@ -19,10 +27,18 @@ outputs:
   normalized:
     enabled: true
     tables:
-    - commoditycodes_2025
+    - cbs2025_commoditycodes
+    - cbs2026_commoditycodes
 collections:
-  commoditycodes_2025:
+  cbs2025_commoditycodes:
     enabled: true
     sheet: CN2025
+    use_first_sheet: true
+    pk:
+      prefer: []
+  cbs2026_commoditycodes:
+    enabled: true
+    sheet: CN2026
+    use_first_sheet: true
     pk:
       prefer: []

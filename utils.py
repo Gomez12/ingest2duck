@@ -9,8 +9,10 @@ import logging
 import os
 import re
 import tempfile
+import uuid
 import zipfile
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import requests
@@ -18,6 +20,127 @@ import yaml
 import dlt
 
 logger = logging.getLogger(__name__)
+
+
+# -----------------------------
+# Source checksum & metadata helpers
+# -----------------------------
+def compute_url_checksum(url: str, timeout_s: int = 180) -> Optional[str]:
+    """
+    Try HEAD request for E-tag/Content-Length checksum.
+    Fallback: download and compute full checksum.
+    """
+    try:
+        logger.debug(f"Checking URL via HEAD request: {url}")
+        with requests.head(url, timeout=timeout_s) as r:
+            r.raise_for_status()
+            etag = r.headers.get("etag")
+            content_length = r.headers.get("content-length")
+            
+            if etag:
+                logger.debug(f"Using E-tag for checksum: {etag}")
+                sha1 = hashlib.sha1()
+                sha1.update(etag.encode("utf-8"))
+                return sha1.hexdigest()
+            
+            if content_length:
+                logger.debug(f"Using Content-Length for checksum: {content_length}")
+                sha1 = hashlib.sha1()
+                sha1.update(url.encode("utf-8"))
+                sha1.update(content_length.encode("utf-8"))
+                return sha1.hexdigest()
+    except Exception as e:
+        logger.debug(f"HEAD request failed: {e}")
+    
+    logger.debug("HEAD request insufficient, falling back to full download")
+    return None
+
+
+def build_sources_resource(sources_metadata: List[Dict[str, Any]], dataset: str):
+    """
+    Generate dlt resource for sourcesmetadata table.
+    Uses append disposition with source_name as primary key.
+    """
+    @dlt.resource(name="sourcesmetadata", write_disposition="append", primary_key="source_name")
+    def sources():
+        for sm in sources_metadata:
+            yield {
+                "source_name": sm["source_name"],
+                "source_url": sm["source_url"],
+                "source_type": sm["source_type"],
+                "first_ingest_timestamp": sm["first_ingest_timestamp"],
+                "last_ingest_timestamp": sm["last_ingest_timestamp"],
+                "last_source_checksum": sm["last_source_checksum"],
+                "last_preliminary_checksum": sm["last_preliminary_checksum"],
+                "last_mapping_checksum": sm["last_mapping_checksum"],
+                "last_source_size_bytes": sm["last_source_size_bytes"],
+                "format": sm["format"],
+                "last_run_id": sm["last_run_id"],
+                "dataset": dataset,
+            }
+    return sources
+
+
+def should_skip_source(
+    source_name: str,
+    new_checksum: Optional[str],
+    new_mapping_checksum: Optional[str],
+    pipeline: dlt.Pipeline,
+    dataset: str,
+    force: bool,
+    check_type: str = "exact"
+) -> bool:
+    """
+    Check if source should be skipped.
+    - check_type="preliminary": Vergelijk met last_preliminary_checksum
+      Skip ALLEEN als preliminary_checksum onveranderd (om download te voorkomen)
+    - check_type="exact": Vergelijk met last_source_checksum EN last_mapping_checksum
+      Skip als source_checksum onveranderd EN mapping_checksum onveranderd
+    - new_mapping_checksum: Huidige mapping checksum (wordt meegegeven)
+    """
+    if force:
+        return False
+    if not new_checksum:
+        return False
+
+    try:
+        with pipeline.sql_client() as client:
+            if check_type == "preliminary":
+                result = client.execute_sql(
+                    "SELECT last_preliminary_checksum, last_mapping_checksum "
+                    "FROM sourcesmetadata "
+                    "WHERE source_name = %s AND dataset = %s",
+                    source_name, dataset
+                )
+                if result is not None:
+                    rows = list(result)
+                    if rows and rows[0]:
+                        stored_prelim = rows[0][0]
+                        stored_mapping = rows[0][1]
+                        logger.info(f"  Preliminary check: stored={stored_prelim[:16] if stored_prelim else None}..., new={new_checksum[:16] if new_checksum else None}..., stored_mapping={stored_mapping[:16] if stored_mapping else None}..., new_mapping={new_mapping_checksum[:16] if new_mapping_checksum else None}...")
+                        if stored_prelim == new_checksum and stored_mapping is not None and stored_mapping == new_mapping_checksum:
+                            logger.debug(f"Preliminary checksum and mapping match: {new_checksum[:16]}...")
+                            return True
+            else:
+                result = client.execute_sql(
+                    "SELECT last_source_checksum, last_mapping_checksum "
+                    "FROM sourcesmetadata "
+                    "WHERE source_name = %s AND dataset = %s",
+                    source_name, dataset
+                )
+                if result is not None:
+                    rows = list(result)
+                    if rows and rows[0]:
+                        stored_exact = rows[0][0]
+                        stored_mapping = rows[0][1]
+                        logger.info(f"  Exact check: stored={stored_exact[:16] if stored_exact else None}..., new={new_checksum[:16] if new_checksum else None}..., stored_mapping={stored_mapping[:16] if stored_mapping else None}..., new_mapping={new_mapping_checksum[:16] if new_mapping_checksum else None}...")
+                        if stored_exact == new_checksum and stored_mapping == new_mapping_checksum:
+                            logger.debug(f"Exact and mapping checksums match")
+                            return True
+    except Exception as e:
+        logger.debug(f"Could not check sourcesmetadata: {e}")
+    
+    return False
 
 
 # -----------------------------
@@ -67,12 +190,110 @@ def ensure_common_mapping(y: Dict[str, Any]) -> Dict[str, Any]:
     y["run"].setdefault("options", {})
     y.setdefault("outputs", {})
     y["outputs"].setdefault("raw", {"enabled": True, "table": "raw_ingest"})
-    y["outputs"].setdefault("normalized", {"enabled": True, "tables": []})
+    y["outputs"].setdefault("normalized", {"enabled": True})
     y.setdefault("collections", {})  # for json/csv/xlsx; xml keeps own structure too
     # destination defaults
     y["run"]["destination"].setdefault("type", "duckdb")
     y["run"]["destination"].setdefault("ducklake", {})
     return y
+
+
+def ensure_common_mapping_v2(mapping: Dict[str, Any]) -> Dict[str, Any]:
+    mapping.setdefault("version", 1)
+    mapping.setdefault("destination", {})
+    mapping.setdefault("options", {})
+    mapping.setdefault("outputs", {})
+    mapping["outputs"].setdefault("raw", {"enabled": True, "table": "raw_ingest"})
+    mapping["outputs"].setdefault("normalized", {"enabled": True})
+    
+    if "sources" not in mapping:
+        raise ValueError("Missing 'sources' in mapping. Use migrate_yaml.py to convert old YAML files.")
+    
+    # Validate each source
+    for source in mapping["sources"]:
+        if "name" not in source:
+            raise ValueError("Each source must have 'name'")
+        if not (source.get("url") or source.get("file")):
+            raise ValueError(f"Source '{source.get('name')}' must have 'url' or 'file'")
+    
+    # destination defaults
+    mapping["destination"].setdefault("type", "duckdb")
+    mapping["destination"].setdefault("ducklake", {})
+    
+    return mapping
+
+
+def get_all_sources(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return mapping.get("sources", [])
+
+
+def build_source_table_name(source_name: str, collection_name: str) -> str:
+    return f"{source_name}_{collection_name}"
+
+
+def generate_run_id() -> str:
+    dt = datetime.now().strftime("%Y%m%d_%H%M%S")
+    uid = str(uuid.uuid4())[:8]
+    return f"ingest_{dt}_{uid}"
+
+
+def compute_file_checksum(file_path: str) -> str:
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def compute_mapping_checksum(mapping_path: str) -> str:
+    sha256 = hashlib.sha256()
+    with open(mapping_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def get_file_size(file_path: str) -> int:
+    return os.path.getsize(file_path)
+
+
+# -----------------------------
+# URL Template Formatting
+# -----------------------------
+def format_url_template(url: str) -> str:
+    """
+    Format URL template with date/datetime placeholders.
+    
+    Supported placeholders:
+    - {today} - current date
+    - {yesterday} - yesterday's date
+    - {tomorrow} - tomorrow's date
+    - {now} - current datetime
+    
+    All placeholders support Python date/datetime format strings:
+    - {today:%Y%m%d} - 20260103
+    - {today:%Y-%m-%d} - 2026-01-03
+    - {now:%Y%m%d%H%M%S} - 20260103143025
+    
+    Args:
+        url: URL template with placeholders
+        
+    Returns:
+        Formatted URL string
+    """
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    tomorrow = today + timedelta(days=1)
+    now = datetime.now()
+    
+    placeholders = {
+        'today': today,
+        'yesterday': yesterday,
+        'tomorrow': tomorrow,
+        'now': now,
+    }
+    
+    return url.format(**placeholders)
 
 
 # -----------------------------
@@ -173,6 +394,7 @@ def prepare_input(source: Dict[str, Any]) -> PreparedInput:
     tempdirs: List[tempfile.TemporaryDirectory] = []
 
     if url:
+        url = format_url_template(url)
         logger.info(f"Processing URL source: {url}")
         td = tempfile.TemporaryDirectory()
         tempdirs.append(td)
@@ -372,14 +594,19 @@ def build_dlt_destination(dst: Dict[str, Any], dataset: str):
         ducklake_name = ducklake_cfg.get("ducklake_name") or dataset
         catalog = ducklake_cfg.get("catalog")
         storage = ducklake_cfg.get("storage")
+        replace_strategy = ducklake_cfg.get("replace_strategy") or "truncate-and-insert"
         logger.debug(
-            f"DuckLake config - name: {ducklake_name}, catalog: {catalog}, storage: {storage}"
+            f"DuckLake config - name: {ducklake_name}, catalog: {catalog}, storage: {storage}, replace_strategy: {replace_strategy}"
         )
 
         # rely on dlt secrets/config if nothing explicit
         if not ducklake_cfg.get("ducklake_name") and not catalog and not storage:
             try:
-                return dlt.destinations.ducklake(), "ducklake", {"mode": "config/auto"}
+                return (
+                    dlt.destinations.ducklake(replace_strategy=replace_strategy),
+                    "ducklake",
+                    {"mode": "config/auto", "replace_strategy": replace_strategy},
+                )
             except Exception as e:
                 raise ImportError(
                     'DuckLake requires: pip install "dlt[ducklake]"'
@@ -400,12 +627,13 @@ def build_dlt_destination(dst: Dict[str, Any], dataset: str):
         try:
             if creds is not None:
                 return (
-                    dlt.destinations.ducklake(credentials=creds),
+                    dlt.destinations.ducklake(credentials=creds, replace_strategy=replace_strategy),
                     "ducklake",
                     {
                         "ducklake_name": ducklake_name,
                         "catalog": catalog,
                         "storage": storage,
+                        "replace_strategy": replace_strategy,
                     },
                 )
         except TypeError:
@@ -417,12 +645,14 @@ def build_dlt_destination(dst: Dict[str, Any], dataset: str):
                     ducklake_name=ducklake_name,
                     catalog=catalog,
                     storage=storage,
+                    replace_strategy=replace_strategy,
                 ),
                 "ducklake",
                 {
                     "ducklake_name": ducklake_name,
                     "catalog": catalog,
                     "storage": storage,
+                    "replace_strategy": replace_strategy,
                 },
             )
         except Exception as e:

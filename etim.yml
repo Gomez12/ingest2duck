@@ -1,390 +1,375 @@
 version: 1
-run:
-  source:
-    url: https://cdn.etim-international.com/exports/ETIMIXF3_1_20251231.xml
-  destination:
-    type: duckdb
-    ducklake: {}
-    dataset: etim
-    duckdb_file: ./etimixf.duckdb
-  options:
-    infer_if_missing: true
+sources:
+- name: etim
+  url: https://cdn.etim-international.com/exports/ETIMIXF3_1_{yesterday:%Y%m%d}.xml
+  collections: {}
+destination:
+  type: ducklake
+  ducklake:
+    ducklake_name: ducklake
+    catalog: sqlite:///ducklake.sqlitedb
+    storage: ./ducklake/
+    replace_strategy: truncate-and-insert
+  dataset: etim
+  duckdb_file: ./etimixf.duckdb
+options:
+  infer_if_missing: true
+  comment: testing mapping change
 outputs:
   raw:
-    enabled: true
+    enabled: false
     table: raw_ingest
   normalized:
     enabled: true
-    tables:
-    - Classes
-    - Classes_Features
-    - Classes_Translations
-    - FeatureGroups
-    - FeatureGroups_Translations
-    - Features
-    - Features_Translations
-    - Groups
-    - Groups_Translations
-    - Header
-    - Meta_Classes
-    - Meta_FeatureGroups
-    - Meta_Features
-    - Meta_Groups
-    - Meta_Units
-    - Meta_Values
-    - Translations
-    - Units
-    - Values
-    - Values_Translations
-collections: {}
 xml_infer:
-  root: IXF
-  collections:
-    Units:
-      enabled: true
-      path: /IXF/Units/Unit
-      pk:
-        prefer:
-        - Code
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Features:
-      enabled: true
-      path: /IXF/Features/Feature
-      pk:
-        prefer:
-        - Code
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    FeatureGroups:
-      enabled: true
-      path: /IXF/FeatureGroups/FeatureGroup
-      pk:
-        prefer:
-        - Code
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Values:
-      enabled: true
-      path: /IXF/Values/Value
-      pk:
-        prefer:
-        - Code
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Groups:
-      enabled: true
-      path: /IXF/Groups/Group
-      pk:
-        prefer:
-        - Code
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Classes:
-      enabled: true
-      path: /IXF/Classes/Class
-      pk:
-        prefer:
-        - Code
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - '@key'
-        - key
-        - '@changeCode'
-      parent: null
-      parent_fk: null
-    Translations:
-      enabled: true
-      path: /IXF/Units/Unit/Translations/Translation
-      pk:
-        prefer:
-        - '@language'
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: Units
-      parent_fk: _parent_pk
-    Features_Translations:
-      enabled: true
-      path: /IXF/Features/Feature/Translations/Translation
-      pk:
-        prefer:
-        - '@language'
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: Features
-      parent_fk: _parent_pk
-    FeatureGroups_Translations:
-      enabled: true
-      path: /IXF/FeatureGroups/FeatureGroup/Translations/Translation
-      pk:
-        prefer:
-        - '@language'
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: FeatureGroups
-      parent_fk: _parent_pk
-    Values_Translations:
-      enabled: true
-      path: /IXF/Values/Value/Translations/Translation
-      pk:
-        prefer:
-        - '@language'
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: Values
-      parent_fk: _parent_pk
-    Groups_Translations:
-      enabled: true
-      path: /IXF/Groups/Group/Translations/Translation
-      pk:
-        prefer:
-        - '@language'
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: Groups
-      parent_fk: _parent_pk
-    Classes_Translations:
-      enabled: true
-      path: /IXF/Classes/Class/Translations/Translation
-      pk:
-        prefer:
-        - '@language'
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: Classes
-      parent_fk: _parent_pk
-    Classes_Features:
-      enabled: true
-      path: /IXF/Classes/Class/Features/Feature
-      pk:
-        prefer:
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-        - '@changeCode'
-      parent: Classes
-      parent_fk: _parent_pk
-    Header:
-      enabled: true
-      path: /IXF/Header
-      pk:
-        prefer:
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Meta_Units:
-      enabled: true
-      path: /IXF/Units
-      pk:
-        prefer:
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Meta_Features:
-      enabled: true
-      path: /IXF/Features
-      pk:
-        prefer:
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Meta_FeatureGroups:
-      enabled: true
-      path: /IXF/FeatureGroups
-      pk:
-        prefer:
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Meta_Values:
-      enabled: true
-      path: /IXF/Values
-      pk:
-        prefer:
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Meta_Groups:
-      enabled: true
-      path: /IXF/Groups
-      pk:
-        prefer:
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
-    Meta_Classes:
-      enabled: true
-      path: /IXF/Classes
-      pk:
-        prefer:
-        - '@id'
-        - id
-        - '@ID'
-        - ID
-        - '@code'
-        - code
-        - '@Code'
-        - Code
-        - '@key'
-        - key
-      parent: null
-      parent_fk: null
+  etim:
+    root: IXF
+    collections:
+      etim_Units:
+        enabled: true
+        path: /IXF/Units/Unit
+        pk:
+          prefer:
+          - Code
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Features:
+        enabled: true
+        path: /IXF/Features/Feature
+        pk:
+          prefer:
+          - Code
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_FeatureGroups:
+        enabled: true
+        path: /IXF/FeatureGroups/FeatureGroup
+        pk:
+          prefer:
+          - Code
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Values:
+        enabled: true
+        path: /IXF/Values/Value
+        pk:
+          prefer:
+          - Code
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Groups:
+        enabled: true
+        path: /IXF/Groups/Group
+        pk:
+          prefer:
+          - Code
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Classes:
+        enabled: true
+        path: /IXF/Classes/Class
+        pk:
+          prefer:
+          - Code
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - '@key'
+          - key
+          - '@changeCode'
+        parent: null
+        parent_fk: null
+      etim_Translations:
+        enabled: true
+        path: /IXF/Units/Unit/Translations/Translation
+        pk:
+          prefer:
+          - '@language'
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: Units
+        parent_fk: _parent_pk
+      etim_Features_Translations:
+        enabled: true
+        path: /IXF/Features/Feature/Translations/Translation
+        pk:
+          prefer:
+          - '@language'
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: Features
+        parent_fk: _parent_pk
+      etim_FeatureGroups_Translations:
+        enabled: true
+        path: /IXF/FeatureGroups/FeatureGroup/Translations/Translation
+        pk:
+          prefer:
+          - '@language'
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: FeatureGroups
+        parent_fk: _parent_pk
+      etim_Values_Translations:
+        enabled: true
+        path: /IXF/Values/Value/Translations/Translation
+        pk:
+          prefer:
+          - '@language'
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: Values
+        parent_fk: _parent_pk
+      etim_Groups_Translations:
+        enabled: true
+        path: /IXF/Groups/Group/Translations/Translation
+        pk:
+          prefer:
+          - '@language'
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: Groups
+        parent_fk: _parent_pk
+      etim_Classes_Translations:
+        enabled: true
+        path: /IXF/Classes/Class/Translations/Translation
+        pk:
+          prefer:
+          - '@language'
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: Classes
+        parent_fk: _parent_pk
+      etim_Classes_Features:
+        enabled: true
+        path: /IXF/Classes/Class/Features/Feature
+        pk:
+          prefer:
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+          - '@changeCode'
+        parent: Classes
+        parent_fk: _parent_pk
+      etim_Header:
+        enabled: true
+        path: /IXF/Header
+        pk:
+          prefer:
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Meta_Units:
+        enabled: true
+        path: /IXF/Units
+        pk:
+          prefer:
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Meta_Features:
+        enabled: true
+        path: /IXF/Features
+        pk:
+          prefer:
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Meta_FeatureGroups:
+        enabled: true
+        path: /IXF/FeatureGroups
+        pk:
+          prefer:
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Meta_Values:
+        enabled: true
+        path: /IXF/Values
+        pk:
+          prefer:
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Meta_Groups:
+        enabled: true
+        path: /IXF/Groups
+        pk:
+          prefer:
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null
+      etim_Meta_Classes:
+        enabled: true
+        path: /IXF/Classes
+        pk:
+          prefer:
+          - '@id'
+          - id
+          - '@ID'
+          - ID
+          - '@code'
+          - code
+          - '@Code'
+          - Code
+          - '@key'
+          - key
+        parent: null
+        parent_fk: null

@@ -4,20 +4,14 @@ This file provides guidance for agentic coding assistants working on the ingest2
 
 ## Build / Lint / Test Commands
 
-This repository uses a simple Python script structure without a formal build system.
-
 **Run the main CLI:**
 ```bash
 python ingest2duck.py --mapping <path> [options]
 ```
 
-**Format validation:**
-- No formal linting setup is configured
-- To check code manually: run `python -m py_compile <file>` to verify syntax
+**Format validation:** No formal linting setup. Run `python -m py_compile <file>` to verify syntax.
 
-**Testing:**
-- No test framework or test directory exists in this repository
-- Manual testing via CLI execution is the current approach
+**Testing:** No test framework exists. Manual testing via CLI execution.
 
 ## Code Style Guidelines
 
@@ -49,10 +43,11 @@ from utils import sanitize_table_name, get_pk_from_record
 ### Type Annotations
 
 - **Always** add type hints to function parameters and return types
-- Use common types: `Any`, `Dict[str, Any]`, `List[str]`, `Optional[str]`, `Iterator[Dict[str, Any]]`
+- Use common types: `Any`, `Dict[str, Any]`, `List[str]`, `Optional[str]`, `Iterator[Dict[str, Any]]`, `Tuple`, `Union`
 - Annotate all function parameters with types
 - Use `-> None` for functions that don't return values
-- For complex nested types, use `Tuple` and `Union` as needed
+- No formal type checking (no mypy), but write annotations as if enabled
+- Use `# type: ignore` sparingly, prefer `Dict[str, Any]` over `dict` for clarity
 
 ### Naming Conventions
 
@@ -62,6 +57,11 @@ from utils import sanitize_table_name, get_pk_from_record
 - **Constants:** `UPPER_SNAKE_CASE` (e.g., `_TABLE_OK_RE`, `PK_BAD_RE`)
 - **Private functions:** Prefix with underscore (e.g., `_infer_pk_prefer_from_header`)
 - **Private class attributes:** Prefix with underscore
+
+Compile regex patterns as module-level constants for performance:
+```python
+_REFISH_RE = re.compile(r"(ref|refs|_id|id|code)$", re.IGNORECASE)
+```
 
 ### Dataclasses
 
@@ -77,12 +77,16 @@ class JsonCollection:
 
 Set sensible defaults for optional boolean fields.
 
-### File Structure
+### File Structure & Comments
 
 - Add a header comment indicating purpose:
   ```python
   # csv2duck.py (library; no CLI) -> supports CSV + XLSX with raw + normalized
   ```
+- Initialize logger at module level: `logger = logging.getLogger(__name__)`
+- Use `logger.info()` for important messages, `logger.debug()` for diagnostics, `logger.warning()` for non-critical issues
+- Keep comments minimal, focused on "why" not "what"
+- Use `#` for comments, docstrings only for complex functions or public APIs
 
 ### Functions
 
@@ -90,22 +94,13 @@ Set sensible defaults for optional boolean fields.
 - Use generators/yield for streaming large datasets (e.g., `iter_json_records`, `iter_csv_rows`)
 - Return iterators when processing large files to avoid loading everything into memory
 - Validate inputs early and raise `ValueError` with descriptive messages
-- Use try-finally blocks for cleanup (temporary files, resources)
 
 ### Error Handling
 
-- Raise `ValueError` for invalid user inputs with clear error messages
-- Raise `FileNotFoundError` for missing files
+- Raise `ValueError` for invalid user inputs, `FileNotFoundError` for missing files
 - Use descriptive error messages that tell the user what's wrong and how to fix it
 - Use try-except for expected errors (file operations, network requests)
 - Use finally blocks for cleanup (temporary directories, file handles)
-
-### Comments
-
-- Keep comments minimal and focused on explaining "why", not "what"
-- Use `#` for comments, not docstrings for single-line explanations
-- Add docstrings only for complex functions or public APIs
-- File headers should clearly indicate if the file is a CLI or library
 
 ### Data Structures
 
@@ -115,14 +110,11 @@ Set sensible defaults for optional boolean fields.
 - Use `Optional[T]` for nullable values
 - Prefer dataclasses over plain dicts for structured data
 
-### String Handling
+### String Handling & Resource Management
 
 - Always use encoding="utf-8" when opening files
 - Use `.strip()` on user inputs and file paths
-- Use `json.dumps(obj, ensure_ascii=False)` for JSON serialization to preserve Unicode
-
-### Resource Management
-
+- Use `json.dumps(obj, ensure_ascii=False)` for JSON serialization
 - Use context managers (`with`) for file operations
 - Clean up temporary directories in finally blocks
 - Close workbooks and file handles explicitly
@@ -136,10 +128,31 @@ Set sensible defaults for optional boolean fields.
   - `build_*`: constructs resources/objects
   - `get_*`: retrieves a value (may return None)
 
-### Type Checking
+### DuckLake Configuration
 
-The codebase doesn't have formal type checking (no mypy config), but:
-- Write type annotations as if type checking were enabled
-- Use `# type: ignore` sparingly and only when necessary
-- Prefer `Dict[str, Any]` over `dict` for type clarity
-- Use `from __future__ import annotations` to enable forward references
+DuckLake supports three replace strategies:
+- `truncate-and-insert` (default, recommended): Direct inserts, no staging, faster for small datasets
+- `insert-from-staging`: Load to staging first, atomic writes with rollback, safer but slower
+- `staging-optimized`: Best for large datasets, maximum safety and performance
+
+Configuration:
+- YAML: `destination.ducklake.replace_strategy`
+- CLI: `--ducklake-replace-strategy {truncate-and-insert,insert-from-staging,staging-optimized}`
+
+**Important:** Use `truncate-and-insert` for ingest2duck (smaller datasets, no rollback needed). When using `write_disposition: merge`, DuckLake automatically creates staging tables regardless of replace_strategy. Staging tables: `{dataset}_staging.{table_name}`, cleaned up after successful merge.
+
+### Source Checksum Tracking
+
+Two-step checksum checking for source files:
+
+**Flow:**
+1. URL sources: HEAD request → E-tag/Content-Length checksum (preliminary check)
+2. If not skipped: download file, compute exact SHA256 checksum
+3. If checksum unchanged + mapping unchanged: skip processing
+4. Otherwise: process data and update `sourcesmetadata` table
+
+**CLI:** `--force` to skip all checksum checks
+
+**sourcesmetadata Table** stores: `source_name` (PK), `source_url`, `source_type`, timestamps, checksums, size, format, `last_run_id`, `dataset`.
+
+**Foreign Key:** Raw and normalized tables reference `sourcesmetadata.source_name` instead of duplicating metadata.

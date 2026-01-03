@@ -98,6 +98,7 @@ class CollectionRule:
 class XmlMapping:
     version: int
     root: str
+    source_name: str
     collections: Dict[str, CollectionRule]
 
 
@@ -458,7 +459,7 @@ def iter_nested_entities_with_parent(xml_path: str, abs_child_path: str, root: s
 # -----------------------------
 # Public: infer XML mapping into a generic YAML structure
 # -----------------------------
-def infer_xml_mapping(xml_path: str) -> XmlMapping:
+def infer_xml_mapping(source_name: str, xml_path: str) -> XmlMapping:
     root = iterparse_root_tag(xml_path)
     counts = iter_paths_counts(xml_path, max_depth=6)
     collections = infer_collections_from_counts(root, counts, min_repeats=2)
@@ -500,7 +501,8 @@ def infer_xml_mapping(xml_path: str) -> XmlMapping:
         rule.pk.prefer = infer_pk_prefer_list(observed_attr_keys, observed_scalar_keys)
         rule.pk.prefer = reorder_pk_prefer_by_uniqueness(rule.pk.prefer, obj_stream())
 
-    return XmlMapping(version=1, root=root, collections=collections)
+    collections_with_prefix = {f"{source_name}_{k}": v for k, v in collections.items()}
+    return XmlMapping(version=1, root=root, source_name=source_name, collections=collections_with_prefix)
 
 
 # -----------------------------
@@ -509,6 +511,7 @@ def infer_xml_mapping(xml_path: str) -> XmlMapping:
 def build_xml_resources(
     xml_path: str,
     xml_mapping: XmlMapping,
+    source_name: str,
     raw_table: str,
     write_disposition: str = "append",
 ):
@@ -527,6 +530,7 @@ def build_xml_resources(
                     yield {
                         "collection": cname,
                         "path": rule.path,
+                        "__source_name": source_name,
                         "raw_json": json.dumps(obj, ensure_ascii=False),
                     }
             else:
@@ -535,6 +539,7 @@ def build_xml_resources(
                     yield {
                         "collection": cname,
                         "path": rule.path,
+                        "__source_name": source_name,
                         "raw_json": json.dumps(child_obj, ensure_ascii=False),
                         "_parent_raw_json": json.dumps(parent_obj, ensure_ascii=False),
                         "_parent_path": parent_abs,
@@ -551,7 +556,10 @@ def build_xml_resources(
             if len(parts) in (2, 3):
                 for obj in iter_entities_by_path(xml_path, rule.path, root):
                     pk = get_pk_from_obj(obj, rule.pk) or stable_hash_obj(obj)
-                    yield to_semiflat_row_xml(obj, str(pk), add_raw_json=True, include_attrs=True)
+                    row = to_semiflat_row_xml(obj, str(pk), add_raw_json=True, include_attrs=True)
+                    row["__source_name"] = source_name
+                    row["__xml_root"] = root
+                    yield row
             else:
                 parent_abs = "/" + "/".join(parts[:3])
                 # find parent rule
@@ -574,6 +582,8 @@ def build_xml_resources(
 
                     row[rule.parent_fk or "_parent_pk"] = str(parent_pk) if parent_pk is not None else None
                     row["_parent_collection"] = parent_collection
+                    row["__source_name"] = source_name
+                    row["__xml_root"] = root
                     yield row
 
         return _res

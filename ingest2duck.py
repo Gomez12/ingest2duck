@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import dlt
@@ -15,32 +16,52 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from utils import (
-    ensure_common_mapping,
+    ensure_common_mapping_v2,
     load_yaml,
     save_yaml,
-    deep_set,
     deep_get,
+    deep_set,
     prepare_input,
     cleanup_prepared,
     build_dlt_destination,
     sanitize_table_name,
+    get_all_sources,
+    generate_run_id,
+    compute_file_checksum,
+    get_file_size,
+    compute_url_checksum,
+    compute_mapping_checksum,
+    build_sources_resource,
+    should_skip_source,
 )
-from xml2duck import infer_xml_mapping, build_xml_resources
-from json2duck import infer_json_mapping, build_json_resources
+from xml2duck import infer_xml_mapping, build_xml_resources, XmlMapping, CollectionRule, PKRule
+from json2duck import infer_json_mapping, build_json_resources, JsonMapping, JsonCollection
 from csv2duck import (
     infer_tabular_mapping_for_csv,
     infer_tabular_mapping_for_xlsx,
     build_tabular_resources,
+    TabularMapping,
+    TabularCollection,
 )
 
 
-def _default_table_from_source_name(source_name: str) -> str:
-    base = os.path.basename(source_name)
-    for ext in (".jsonl", ".ndjson", ".json", ".xml", ".csv", ".xlsx", ".gz", ".zip"):
-        if base.lower().endswith(ext):
-            base = base[: -len(ext)]
-            break
-    return sanitize_table_name(base, "data")
+def rebuild_xml_mapping_from_yaml(source_name: str, xml_infer: Dict[str, Any]) -> XmlMapping:
+    root = xml_infer["root"]
+    cols: Dict[str, CollectionRule] = {}
+    for cname, c in (xml_infer.get("collections") or {}).items():
+        if not bool(c.get("enabled", True)):
+            continue
+        pk = PKRule(
+            prefer=list((c.get("pk") or {}).get("prefer", ["@id", "id"]))
+        )
+        cols[cname] = CollectionRule(
+            path=c["path"],
+            pk=pk,
+            parent=c.get("parent"),
+            parent_fk=c.get("parent_fk"),
+            enabled=True,
+        )
+    return XmlMapping(version=1, root=root, source_name=source_name, collections=cols)
 
 
 def main() -> None:
@@ -52,467 +73,484 @@ def main() -> None:
         help="Mapping YAML for run config + inferred collections",
     )
 
-    # source
-    ap.add_argument("--url", default=None, help="Source URL (stored in run.source.url)")
-    ap.add_argument(
-        "--file", default=None, help="Local file path (stored in run.source.file)"
-    )
-    ap.add_argument(
-        "--format",
-        choices=["auto", "xml", "json", "jsonl", "csv", "xlsx"],
-        default=None,
-        help="Stored in run.source.format",
-    )
-    ap.add_argument(
-        "--timeout-s",
-        dest="timeout_s",
-        type=int,
-        default=None,
-        help="Stored in run.source.timeout_s",
-    )
-    ap.add_argument(
-        "--member",
-        default=None,
-        help="ZIP member to pick (stored in run.source.member)",
-    )
-
-    # json options
-    ap.add_argument(
-        "--records-path",
-        default=None,
-        help="For JSON: dotted path to list (stored in run.source.records_path)",
-    )
-
-    # xlsx options
-    ap.add_argument(
-        "--sheet",
-        default=None,
-        help="For XLSX: sheet name (stored in run.source.sheet)",
-    )
-
-    # csv options
-    ap.add_argument(
-        "--delimiter",
-        default=None,
-        help="CSV delimiter (stored in run.source.delimiter)",
-    )
-    ap.add_argument(
-        "--encoding", default=None, help="CSV encoding (stored in run.source.encoding)"
-    )
-
-    # destination
-    ap.add_argument("--dataset", default=None, help="Stored in run.destination.dataset")
+    ap.add_argument("--dataset", default=None, help="Override destination.dataset")
     ap.add_argument(
         "--duckdb-file",
         dest="duckdb_file",
         default=None,
-        help="Stored in run.destination.duckdb_file",
+        help="Override destination.duckdb_file",
     )
     ap.add_argument(
         "--destination-type",
         choices=["duckdb", "ducklake"],
         default=None,
-        help="Stored in run.destination.type",
+        help="Override destination.type",
     )
     ap.add_argument(
         "--ducklake-name",
         default=None,
-        help="Stored in run.destination.ducklake.ducklake_name",
+        help="Override destination.ducklake.ducklake_name",
     )
     ap.add_argument(
         "--ducklake-catalog",
         default=None,
-        help="Stored in run.destination.ducklake.catalog",
+        help="Override destination.ducklake.catalog",
     )
     ap.add_argument(
         "--ducklake-storage",
         default=None,
-        help="Stored in run.destination.ducklake.storage",
+        help="Override destination.ducklake.storage",
+    )
+    ap.add_argument(
+        "--ducklake-replace-strategy",
+        choices=["truncate-and-insert", "insert-from-staging", "staging-optimized"],
+        default="truncate-and-insert",
+        help="Override destination.ducklake.replace_strategy",
     )
 
-    # run options
     ap.add_argument(
         "--infer-if-missing",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Infer collections if missing (stored in run.options.infer_if_missing)",
+        help="Infer collections if missing",
     )
     ap.add_argument(
         "--write-disposition",
-        choices=["append", "replace"],
+        choices=["append", "replace", "merge", "skip"],
         default=None,
-        help="Stored in run.options.write_disposition",
+        help="Global write disposition",
     )
-    ap.add_argument("--raw-table", default=None, help="Stored in outputs.raw.table")
+    ap.add_argument("--raw-table", default=None, help="Override outputs.raw.table")
+
     ap.add_argument(
-        "--table",
-        default=None,
-        help="For csv/xlsx/json single-stream: default collection/table name (stored in run.options.table)",
-    )
-    ap.add_argument(
-        "--pk-fields",
-        default=None,
-        help="Comma-separated pk fields override for non-XML (stored in run.options.pk_fields)",
+        "--force",
+        action="store_true",
+        default=False,
+        help="Forceer herverwerking van alle sources, ongeacht checksum",
     )
 
     args = ap.parse_args()
 
     logger.info(f"Starting ingest2duck with mapping file: {args.mapping}")
 
-    # load + defaults
-    y = ensure_common_mapping(load_yaml(args.mapping))
+    # Laad nieuwe multi-source structuur
+    y = ensure_common_mapping_v2(load_yaml(args.mapping))
     logger.info("Loaded mapping configuration")
+    mapping_checksum = compute_mapping_checksum(args.mapping)
+    logger.debug(f"Mapping checksum: {mapping_checksum[:16]}...")
 
-    # CLI -> mapping.run
-    if args.url is not None:
-        deep_set(y, ["run", "source", "url"], args.url)
-    if args.file is not None:
-        deep_set(y, ["run", "source", "file"], args.file)
-    if args.timeout_s is not None:
-        deep_set(y, ["run", "source", "timeout_s"], int(args.timeout_s))
-    if args.format is not None:
-        deep_set(y, ["run", "source", "format"], args.format)
-    if args.member is not None:
-        deep_set(y, ["run", "source", "member"], args.member)
+    # Generate run ID
+    run_id = generate_run_id()
+    logger.info(f"Run ID: {run_id}")
 
-    if args.records_path is not None:
-        deep_set(y, ["run", "source", "records_path"], args.records_path)
-    if args.sheet is not None:
-        deep_set(y, ["run", "source", "sheet"], args.sheet)
-    if args.delimiter is not None:
-        deep_set(y, ["run", "source", "delimiter"], args.delimiter)
-    if args.encoding is not None:
-        deep_set(y, ["run", "source", "encoding"], args.encoding)
+    # Haal alle sources op
+    sources = get_all_sources(y)
+    if not sources:
+        raise ValueError("No sources defined")
+    logger.info(f"Found {len(sources)} source(s) to process")
 
+    # Apply CLI overrides
+    dst = y["destination"]
+    opts = y["options"]
+    
     if args.dataset is not None:
-        deep_set(y, ["run", "destination", "dataset"], args.dataset)
+        dst["dataset"] = args.dataset
     if args.duckdb_file is not None:
-        deep_set(y, ["run", "destination", "duckdb_file"], args.duckdb_file)
+        dst["duckdb_file"] = args.duckdb_file
     if args.destination_type is not None:
-        deep_set(y, ["run", "destination", "type"], args.destination_type)
+        dst["type"] = args.destination_type
     if args.ducklake_name is not None:
-        deep_set(
-            y, ["run", "destination", "ducklake", "ducklake_name"], args.ducklake_name
-        )
+        dst.setdefault("ducklake", {})["ducklake_name"] = args.ducklake_name
     if args.ducklake_catalog is not None:
-        deep_set(
-            y, ["run", "destination", "ducklake", "catalog"], args.ducklake_catalog
-        )
+        dst.setdefault("ducklake", {})["catalog"] = args.ducklake_catalog
     if args.ducklake_storage is not None:
-        deep_set(
-            y, ["run", "destination", "ducklake", "storage"], args.ducklake_storage
-        )
-
+        dst.setdefault("ducklake", {})["storage"] = args.ducklake_storage
+    if args.ducklake_replace_strategy is not None:
+        dst.setdefault("ducklake", {})["replace_strategy"] = args.ducklake_replace_strategy
+    
     if args.infer_if_missing is not None:
-        deep_set(y, ["run", "options", "infer_if_missing"], bool(args.infer_if_missing))
+        opts["infer_if_missing"] = bool(args.infer_if_missing)
     if args.write_disposition is not None:
-        deep_set(y, ["run", "options", "write_disposition"], args.write_disposition)
+        opts["write_disposition"] = args.write_disposition
     if args.raw_table is not None:
         deep_set(y, ["outputs", "raw", "table"], args.raw_table)
-    if args.table is not None:
-        deep_set(y, ["run", "options", "table"], args.table)
-    if args.pk_fields is not None:
-        deep_set(
-            y,
-            ["run", "options", "pk_fields"],
-            [s.strip() for s in args.pk_fields.split(",") if s.strip()],
-        )
 
-    # persist early (so a "first run" always materializes run config)
-    save_yaml(y, args.mapping)
-    logger.info("Saved mapping configuration")
-
-    run = y["run"]
-    src = run["source"]
-    dst = run["destination"]
-    opts = run["options"]
-
-    dataset = dst.get("dataset")
+    # Destination & options
     dest_type = str(dst.get("type") or "duckdb").strip().lower()
+    dataset = dst.get("dataset")
     infer_if_missing = bool(opts.get("infer_if_missing", False))
-    write_disposition = str(opts.get("write_disposition") or "append")
+    global_write_disposition = str(opts.get("write_disposition") or "append")
     raw_table = str(deep_get(y, ["outputs", "raw", "table"], "raw_ingest"))
     raw_table = sanitize_table_name(raw_table, "raw_ingest")
 
-    pk_fields_override = opts.get("pk_fields") or None
-    if isinstance(pk_fields_override, str):
-        pk_fields_override = [
-            s.strip() for s in pk_fields_override.split(",") if s.strip()
-        ]
-
-    # validation
-    missing: List[str] = []
-    if not (src.get("url") or src.get("file")):
-        missing.append("run.source.url|file")
-    if not dataset:
-        missing.append("run.destination.dataset")
-    if dest_type == "duckdb" and not dst.get("duckdb_file"):
-        missing.append("run.destination.duckdb_file (required for type=duckdb)")
-    if missing:
-        raise ValueError("Missing required settings: " + ", ".join(missing))
-
-    logger.info(
-        f"Configuration validated - destination type: {dest_type}, dataset: {dataset}, write disposition: {write_disposition}"
+    dest_obj, dest_kind, dest_meta = build_dlt_destination(dst, dataset)
+    pipeline = dlt.pipeline(
+        pipeline_name=f"ingest_{dest_kind}_{dataset}",
+        destination=dest_obj,
+        dataset_name=dataset,
     )
+    logger.info(f"Created pipeline: ingest_{dest_kind}_{dataset}")
 
-    # prepare input (download + unzip/gunzip + detect fmt)
-    logger.info("Preparing input...")
-    prep = prepare_input(src)
-    try:
-        fmt = prep.fmt
-        source_name = prep.source_name
+    # Process elke source
+    all_raw_resources = []
+    all_normalized_resources = {}
+    all_prepared = []
+    sources_metadata_updates: List[Dict[str, Any]] = []
 
-        logger.info(f"Detected format: {fmt}, source: {source_name}")
+    for source_config in sources:
+        source_name = source_config["name"]
+        logger.info(f"Processing source: {source_name}")
 
-        # default table name
-        default_table = sanitize_table_name(
-            str(opts.get("table") or _default_table_from_source_name(source_name)),
-            "data",
-        )
-        logger.info(f"Default table name: {default_table}")
+        source_url = source_config.get("url") or source_config.get("file", "")
+        source_type = "url" if source_config.get("url") else "file"
 
-        # infer mapping if needed per format
-        # - XML uses its own structure under y["xml"] and y["collections_xml"] (we store as y["xml_infer"])
-        # - JSON/tabular store into y["collections"] generic
-        if fmt == "xml":
-            logger.info("Processing XML format")
-            # store inferred xml mapping under y["xml_infer"] for readability
-            if not y.get("xml_infer") or not (y["xml_infer"].get("collections")):
-                if not infer_if_missing:
-                    raise ValueError(
-                        "XML mapping missing. Set run.options.infer_if_missing=true or run once with --infer-if-missing."
-                    )
-                logger.info("Inferring XML mapping...")
-                xm = infer_xml_mapping(prep.path)
-                logger.info(f"Inferred {len(xm.collections)} XML collections")
-                y["xml_infer"] = {
-                    "root": xm.root,
-                    "collections": {
-                        cname: {
-                            "enabled": True,
-                            "path": rule.path,
-                            "pk": {"prefer": rule.pk.prefer},
-                            "parent": rule.parent,
-                            "parent_fk": rule.parent_fk,
-                        }
-                        for cname, rule in xm.collections.items()
-                    },
-                }
-                # normalized tables default
-                y["outputs"]["normalized"]["tables"] = sorted(
-                    list(xm.collections.keys())
-                )
-                save_yaml(y, args.mapping)
-                logger.info("Saved XML mapping to configuration")
+        # Stap A: Checksum berekenen (VOOR prepare_input) - voorlopige check via HEAD request
+        preliminary_checksum: Optional[str] = None
+        source_size: Optional[int] = None
+        timeout_s = int(source_config.get("timeout_s", 180))
 
-            # rebuild XmlMapping from yaml
-            from xml2duck import XmlMapping, CollectionRule, PKRule
-
-            xm_root = y["xml_infer"]["root"]
-            xm_cols: Dict[str, CollectionRule] = {}
-            for cname, c in (y["xml_infer"]["collections"] or {}).items():
-                if not bool(c.get("enabled", True)):
-                    continue
-                pk = PKRule(
-                    prefer=list((c.get("pk") or {}).get("prefer", ["@id", "id"]))
-                )
-                xm_cols[cname] = CollectionRule(
-                    path=c["path"],
-                    pk=pk,
-                    parent=c.get("parent"),
-                    parent_fk=c.get("parent_fk"),
-                    enabled=True,
-                )
-            xml_mapping = XmlMapping(version=1, root=xm_root, collections=xm_cols)
-            logger.info(f"Loaded {len(xm_cols)} enabled XML collections from mapping")
-
-            logger.info("Building XML resources...")
-            raw_res, norm_res_map = build_xml_resources(
-                xml_path=prep.path,
-                xml_mapping=xml_mapping,
-                raw_table=raw_table,
-                write_disposition=write_disposition,
-            )
-
-        elif fmt in ("json", "jsonl"):
-            logger.info(f"Processing {fmt.upper()} format")
-            # infer collections if missing
-            if not y.get("collections"):
-                if not infer_if_missing:
-                    raise ValueError(
-                        "JSON mapping missing. Set run.options.infer_if_missing=true or run once with --infer-if-missing."
-                    )
-                records_path = src.get("records_path")
-                logger.info("Inferring JSON mapping...")
-                jm = infer_json_mapping(prep.path, fmt=fmt, records_path=records_path)
-                logger.info(f"Inferred {len(jm.collections)} JSON collections")
-                y["collections"] = {
-                    cname: {
-                        "enabled": True,
-                        "path": col.path,
-                        "pk": {"prefer": col.pk_prefer},
-                    }
-                    for cname, col in jm.collections.items()
-                }
-                y["outputs"]["normalized"]["tables"] = sorted(
-                    list(jm.collections.keys())
-                )
-                save_yaml(y, args.mapping)
-                logger.info("Saved JSON mapping to configuration")
-
-            # rebuild JsonMapping from yaml
-            from json2duck import JsonMapping, JsonCollection
-
-            cols: Dict[str, JsonCollection] = {}
-            for cname, c in (y.get("collections") or {}).items():
-                if not bool(c.get("enabled", True)):
-                    continue
-                cols[cname] = JsonCollection(
-                    name=cname,
-                    path=str(c.get("path") or "$"),
-                    pk_prefer=list(
-                        (c.get("pk") or {}).get(
-                            "prefer", ["id", "ID", "code", "Code", "key", "Key"]
-                        )
-                    ),
-                    enabled=True,
-                )
-            json_mapping = JsonMapping(collections=cols)
-            logger.info(f"Loaded {len(cols)} enabled JSON collections from mapping")
-
-            logger.info("Building JSON resources...")
-            raw_res, norm_res_map = build_json_resources(
-                file_path=prep.path,
-                fmt=fmt,
-                mapping=json_mapping,
-                raw_table=raw_table,
-                write_disposition=write_disposition,
-                records_path_override=src.get("records_path"),
-                pk_fields_override=pk_fields_override,
-            )
-
-        elif fmt in ("csv", "xlsx"):
-            logger.info(f"Processing {fmt.upper()} format")
-            # infer collections if missing
-            if not y.get("collections"):
-                if not infer_if_missing:
-                    raise ValueError(
-                        "Tabular mapping missing. Set run.options.infer_if_missing=true or run once with --infer-if-missing."
-                    )
-                if fmt == "csv":
-                    delim = str(src.get("delimiter") or ",")
-                    enc = str(src.get("encoding") or "utf-8")
-                    logger.info(
-                        f"Inferring CSV mapping with delimiter={delim}, encoding={enc}"
-                    )
-                    tm = infer_tabular_mapping_for_csv(
-                        default_table, prep.path, delimiter=delim, encoding=enc
-                    )
+        if source_config.get("url"):
+            logger.info(f"  Checking URL checksum: {source_url}")
+            try:
+                preliminary_checksum = compute_url_checksum(source_url, timeout_s)
+                if preliminary_checksum:
+                    logger.info(f"  URL checksum (preliminary): {preliminary_checksum[:16]}...")
                 else:
-                    sheet = src.get("sheet")
-                    logger.info(
-                        f"Inferring XLSX mapping with sheet={sheet or 'default'}"
-                    )
-                    tm = infer_tabular_mapping_for_xlsx(
-                        default_table, prep.path, sheet=sheet
-                    )
-                logger.info(f"Inferred {len(tm.collections)} tabular collections")
+                    logger.info(f"  URL checksum not available via HEAD request, will compute after download")
+            except Exception as e:
+                logger.warning(f"  Could not compute URL checksum: {e}")
+        else:
+            fpath = source_config.get("file")
+            if fpath and os.path.exists(fpath):
+                logger.info(f"  Computing file checksum: {fpath}")
+                try:
+                    preliminary_checksum = compute_file_checksum(fpath)
+                    source_size = get_file_size(fpath)
+                    logger.info(f"  File checksum: {preliminary_checksum[:16]}...")
+                except Exception as e:
+                    logger.warning(f"  Could not compute file checksum: {e}")
 
-                y["collections"] = {
-                    cname: {
-                        "enabled": True,
-                        "sheet": col.sheet,
-                        "pk": {"prefer": col.pk_prefer or []},
+        # Stap B: Check of skip met voorlopige checksum (VOOR download/prepare)
+        if should_skip_source(source_name, preliminary_checksum, mapping_checksum, pipeline, dataset, args.force, check_type="preliminary"):
+            logger.info(f"  Skipping '{source_name}' - preliminary checksum unchanged (use --force to override)")
+            continue
+
+        # Prepare input (download + detect fmt)
+        prep = prepare_input(source_config)
+        all_prepared.append(prep)
+
+        try:
+            fmt = prep.fmt
+
+            # Stap D: Bereken exacte checksum en grootte van gedownloade file
+            exact_checksum: Optional[str] = None
+            try:
+                exact_checksum = compute_file_checksum(prep.path)
+                source_size = get_file_size(prep.path)
+                logger.info(f"  Exact checksum: {exact_checksum[:16]}...")
+            except Exception as e:
+                logger.warning(f"  Could not compute file checksum: {e}")
+
+            # Stap E: Check NOGMAALS met exacte checksum (NA download)
+            if should_skip_source(source_name, exact_checksum, mapping_checksum, pipeline, dataset, args.force, check_type="exact"):
+                logger.info(f"  Skipping '{source_name}' - exact and mapping checksums unchanged (use --force to override)")
+                cleanup_prepared(prep)
+                continue
+
+            # Format-specific processing
+            if fmt == "xml":
+                # Check/Infer XML mapping
+                xml_infer = y.get("xml_infer", {}).get(source_name)
+                if not xml_infer or not xml_infer.get("collections"):
+                    if not infer_if_missing:
+                        raise ValueError(f"XML mapping for source '{source_name}' missing")
+                    logger.info("  Inferring XML mapping...")
+                    xm = infer_xml_mapping(source_name, prep.path)
+                    if "xml_infer" not in y:
+                        y["xml_infer"] = {}
+                    y["xml_infer"][source_name] = {
+                        "root": xm.root,
+                        "collections": {
+                            cname: {
+                                "enabled": True,
+                                "path": rule.path,
+                                "pk": {"prefer": rule.pk.prefer},
+                                "parent": rule.parent,
+                                "parent_fk": rule.parent_fk,
+                            }
+                            for cname, rule in xm.collections.items()
+                        }
                     }
-                    for cname, col in tm.collections.items()
-                }
-                y["outputs"]["normalized"]["tables"] = sorted(
-                    list(tm.collections.keys())
+                    save_yaml(y, args.mapping)
+                    logger.info("  Saved XML mapping to configuration")
+                else:
+                    # Rebuild from yaml
+                    xm = rebuild_xml_mapping_from_yaml(source_name, xml_infer)
+                    logger.info(f"  Loaded {len(xm.collections)} XML collections from mapping")
+
+                raw_res, norm_res = build_xml_resources(
+                    xml_path=prep.path,
+                    xml_mapping=xm,
+                    source_name=source_name,
+                    raw_table=raw_table,
+                    write_disposition=global_write_disposition,
                 )
-                save_yaml(y, args.mapping)
-                logger.info("Saved tabular mapping to configuration")
 
-            # rebuild TabularMapping from yaml
-            from csv2duck import TabularMapping, TabularCollection
+            elif fmt in ("json", "jsonl"):
+                # JSON processing
+                collections_config = source_config.get("collections", {})
 
-            cols: Dict[str, TabularCollection] = {}
-            for cname, c in (y.get("collections") or {}).items():
-                if not bool(c.get("enabled", True)):
-                    continue
-                cols[cname] = TabularCollection(
-                    name=cname,
-                    kind=fmt,
-                    sheet=c.get("sheet")
-                    or (src.get("sheet") if fmt == "xlsx" else None),
-                    pk_prefer=list((c.get("pk") or {}).get("prefer", [])),
-                    enabled=True,
+                # Infer if needed
+                if not y.get("collections") or not any(c.startswith(f"{source_name}_") for c in y.get("collections", {})):
+                    if not infer_if_missing:
+                        raise ValueError(f"JSON mapping for source '{source_name}' missing")
+                    logger.info("  Inferring JSON mapping...")
+                    records_path = source_config.get("records_path")
+                    jm = infer_json_mapping(source_name, prep.path, fmt=fmt, records_path=records_path)
+                    logger.info(f"  Inferred {len(jm.collections)} JSON collections")
+
+                    # Merge with existing collections
+                    if "collections" not in y:
+                        y["collections"] = {}
+                    for cname, col in jm.collections.items():
+                        y["collections"][cname] = {
+                            "enabled": True,
+                            "path": col.path,
+                            "pk": {"prefer": col.pk_prefer},
+                        }
+                    save_yaml(y, args.mapping)
+                    logger.info("  Saved JSON mapping to configuration")
+
+                # Rebuild JsonMapping
+                json_collections: Dict[str, JsonCollection] = {}
+                for cname, c in (y.get("collections") or {}).items():
+                    if not cname.startswith(f"{source_name}_"):
+                        continue
+                    if not bool(c.get("enabled", True)):
+                        continue
+
+                    # Override with source-specific config
+                    col_config = collections_config.get(cname.replace(f"{source_name}_", ""), {})
+
+                    json_collections[cname] = JsonCollection(
+                        name=cname,
+                        path=str(col_config.get("path") or c.get("path") or "$"),
+                        pk_prefer=list((c.get("pk") or {}).get("prefer", ["id", "ID", "code", "Code", "key", "Key"])),
+                        write_disposition=col_config.get("write_disposition"),
+                        enabled=True,
+                    )
+
+                json_mapping = JsonMapping(collections=json_collections)
+                logger.info(f"  Loaded {len(json_collections)} enabled JSON collections from mapping")
+
+                raw_res, norm_res = build_json_resources(
+                    file_path=prep.path,
+                    fmt=fmt,
+                    mapping=json_mapping,
+                    source_name=source_name,
+                    raw_table=raw_table,
+                    write_disposition=global_write_disposition,
+                    records_path_override=source_config.get("records_path"),
                 )
-            tab_mapping = TabularMapping(collections=cols)
-            logger.info(f"Loaded {len(cols)} enabled tabular collections from mapping")
 
-            delim = str(src.get("delimiter") or ",")
-            enc = str(src.get("encoding") or "utf-8")
+            elif fmt in ("csv", "xlsx"):
+                # Tabular processing
+                tabular_collections_config = source_config.get("collections", {})
+                default_table = "data"
 
-            logger.info("Building tabular resources...")
-            raw_res, norm_res_map = build_tabular_resources(
-                file_path=prep.path,
-                fmt=fmt,
-                mapping=tab_mapping,
-                raw_table=raw_table,
-                write_disposition=write_disposition,
-                delimiter=delim,
-                encoding=enc,
-                pk_fields_override=pk_fields_override,
-            )
-        else:
-            raise ValueError(f"Unsupported format: {fmt}")
+                # Infer if needed
+                if not y.get("collections") or not any(c.startswith(f"{source_name}_") for c in y.get("collections", {})):
+                    if not infer_if_missing:
+                        raise ValueError(f"Tabular mapping for source '{source_name}' missing")
+                    logger.info("  Inferring tabular mapping...")
 
-        # destination + pipeline
-        logger.info(f"Setting up destination: {dest_type}")
-        dest_obj, dest_kind, dest_meta = build_dlt_destination(dst, str(dataset))
-        pipeline = dlt.pipeline(
-            pipeline_name=f"ingest_{dest_kind}_{dataset}",
-            destination=dest_obj,
-            dataset_name=dataset,
-        )
-        logger.info(f"Created pipeline: ingest_{dest_kind}_{dataset}")
+                    if fmt == "csv":
+                        delim = str(source_config.get("delimiter") or ",")
+                        enc = str(source_config.get("encoding") or "utf-8")
+                        tm = infer_tabular_mapping_for_csv(source_name, default_table, prep.path, delim, enc)
+                    else:
+                        # XLSX: support multiple collections or default single
+                        if tabular_collections_config:
+                            # Multiple collections configured
+                            tab_collections: Dict[str, TabularCollection] = {}
+                            for col_name, col_cfg in tabular_collections_config.items():
+                                sheet = col_cfg.get("sheet")
+                                use_first_sheet = col_cfg.get("use_first_sheet", False)
+                                tm = infer_tabular_mapping_for_xlsx(
+                                    source_name, col_name, prep.path,
+                                    sheet=sheet, use_first_sheet=use_first_sheet
+                                )
+                                tab_collections.update(tm.collections)
+                            tm = TabularMapping(collections=tab_collections)
+                        else:
+                            # Default: single collection
+                            sheet = source_config.get("sheet")
+                            use_first_sheet = source_config.get("use_first_sheet", False)
+                            tm = infer_tabular_mapping_for_xlsx(
+                                source_name, default_table, prep.path,
+                                sheet=sheet, use_first_sheet=use_first_sheet
+                            )
 
-        # run raw
-        if bool(deep_get(y, ["outputs", "raw", "enabled"], True)):
-            logger.info(f"Running raw table ingestion to '{raw_table}'...")
+                    logger.info(f"  Inferred {len(tm.collections)} tabular collections")
+
+                    # Merge with existing collections
+                    if "collections" not in y:
+                        y["collections"] = {}
+                    for cname, col in tm.collections.items():
+                        y["collections"][cname] = {
+                            "enabled": True,
+                            "sheet": col.sheet,
+                            "use_first_sheet": col.use_first_sheet,
+                            "pk": {"prefer": col.pk_prefer or []},
+                        }
+                    save_yaml(y, args.mapping)
+                    logger.info("  Saved tabular mapping to configuration")
+
+                # Rebuild TabularMapping
+                tabular_collections: Dict[str, TabularCollection] = {}
+                for cname, c in (y.get("collections") or {}).items():
+                    if not cname.startswith(f"{source_name}_"):
+                        continue
+                    if not bool(c.get("enabled", True)):
+                        continue
+
+                    # Override with source-specific config
+                    col_name = cname.replace(f"{source_name}_", "")
+                    col_config = tabular_collections_config.get(col_name, {})
+
+                    tabular_collections[cname] = TabularCollection(
+                        name=cname,
+                        kind=fmt,
+                        sheet=col_config.get("sheet") or c.get("sheet") or (source_config.get("sheet") if fmt == "xlsx" else None),
+                        use_first_sheet=col_config.get("use_first_sheet", c.get("use_first_sheet", False)),
+                        pk_prefer=list((c.get("pk") or {}).get("prefer", [])),
+                        write_disposition=col_config.get("write_disposition"),
+                        enabled=True,
+                    )
+
+                tab_mapping = TabularMapping(collections=tabular_collections)
+                logger.info(f"  Loaded {len(tabular_collections)} enabled tabular collections from mapping")
+
+                csv_delimiter = str(source_config.get("delimiter") or ",") if fmt == "csv" else ","
+                csv_encoding = str(source_config.get("encoding") or "utf-8")
+                
+                raw_res, norm_res = build_tabular_resources(
+                    file_path=prep.path,
+                    fmt=fmt,
+                    mapping=tab_mapping,
+                    source_name=source_name,
+                    raw_table=raw_table,
+                    write_disposition=global_write_disposition,
+                    delimiter=csv_delimiter,
+                    encoding=csv_encoding,
+                )
+
+            else:
+                raise ValueError(f"Unsupported format: {fmt}")
+
+            # Stap F: Collect metadata voor sourcesmetadata tabel
+            current_timestamp = datetime.now().isoformat() + "Z"
+
+            # Check of dit een nieuwe source is
+            existing_source = None
+            try:
+                with pipeline.sql_client() as client:
+                    result = client.execute_sql(
+                        "SELECT first_ingest_timestamp, last_source_checksum "
+                        "FROM sourcesmetadata "
+                        "WHERE source_name = %s AND dataset = %s",
+                        source_name, dataset
+                    )
+                    if result is not None:
+                        rows = list(result)
+                        if rows and rows[0]:
+                            existing_source = {
+                                "first_ingest_timestamp": rows[0][0],
+                                "last_source_checksum": rows[0][1],
+                            }
+            except Exception as e:
+                logger.debug(f"Could not query sourcesmetadata table: {e}")
+
+            # Update of new source record
+            if existing_source:
+                # Check of checksum gewijzigd
+                update_run_id = (existing_source["last_source_checksum"] != exact_checksum)
+
+                sources_metadata_updates.append({
+                    "source_name": source_name,
+                    "source_url": source_url,
+                    "source_type": source_type,
+                    "first_ingest_timestamp": existing_source["first_ingest_timestamp"],
+                    "last_ingest_timestamp": current_timestamp,
+                    "last_source_checksum": exact_checksum,
+                    "last_preliminary_checksum": preliminary_checksum,
+                    "last_mapping_checksum": mapping_checksum,
+                    "last_source_size_bytes": source_size,
+                    "format": fmt,
+                    "last_run_id": run_id if update_run_id else None,
+                })
+            else:
+                # Nieuwe source
+                sources_metadata_updates.append({
+                    "source_name": source_name,
+                    "source_url": source_url,
+                    "source_type": source_type,
+                    "first_ingest_timestamp": current_timestamp,
+                    "last_ingest_timestamp": current_timestamp,
+                    "last_source_checksum": exact_checksum,
+                    "last_preliminary_checksum": preliminary_checksum,
+                    "last_mapping_checksum": mapping_checksum,
+                    "last_source_size_bytes": source_size,
+                    "format": fmt,
+                    "last_run_id": run_id,
+                })
+
+            # Voeg resources toe aan lists
+            all_raw_resources.append(raw_res)
+            all_normalized_resources.update(norm_res)
+
+        except Exception:
+            # Cleanup only on error
+            cleanup_prepared(prep)
+            raise
+
+    # Update sourcesmetadata table
+    if sources_metadata_updates:
+        logger.info(f"Updating sourcesmetadata table with {len(sources_metadata_updates)} records")
+        pipeline.run(build_sources_resource(sources_metadata_updates, dataset))
+
+    # Run raw
+    if bool(deep_get(y, ["outputs", "raw", "enabled"], True)):
+        logger.info(f"Running raw table ingestion to '{raw_table}'...")
+        for raw_res in all_raw_resources:
             pipeline.run(raw_res)
-            logger.info("Raw table ingestion completed")
+        logger.info("Raw table ingestion completed")
 
-        # run normalized
-        if bool(deep_get(y, ["outputs", "normalized", "enabled"], True)):
-            tables = deep_get(y, ["outputs", "normalized", "tables"], []) or list(
-                norm_res_map.keys()
-            )
-            # tables can be names; map by original key; resources are sanitized internally
-            logger.info(
-                f"Running normalized table ingestion for {len(tables)} tables..."
-            )
-            for t in tables:
-                if t in norm_res_map:
-                    logger.info(f"  - Processing table: {t}")
-                    pipeline.run(norm_res_map[t])
-            logger.info("Normalized table ingestion completed")
-
-        logger.info("Ingestion completed successfully")
-        print("Done.")
-        print(f"- format      : {fmt}")
-        print(f"- destination : {dest_kind}")
-        if dest_kind == "duckdb":
-            print(f"- duckdb-file : {os.path.abspath(str(dst.get('duckdb_file')))}")
-        else:
-            print(f"- ducklake    : {dest_meta}")
-        print(f"- dataset     : {dataset}")
-        print(f"- mapping     : {os.path.abspath(args.mapping)}")
-
-    finally:
-        logger.info("Cleaning up temporary files...")
+    # Run normalized
+    if bool(deep_get(y, ["outputs", "normalized", "enabled"], True)):
+        # Auto-detect tables from normalized_resources
+        tables = list(all_normalized_resources.keys())
+        logger.info(f"Running normalized table ingestion for {len(tables)} tables...")
+        for t in tables:
+            logger.info(f"  - Processing table: {t}")
+            pipeline.run(all_normalized_resources[t])
+        logger.info("Normalized table ingestion completed")
+    
+    # Cleanup temp files after all ingestion is complete
+    for prep in all_prepared:
         cleanup_prepared(prep)
-        logger.info("Temporary files cleaned up")
+
+    logger.info("Ingestion completed successfully")
+    print("Done.")
+    print(f"- run_id      : {run_id}")
+    print(f"- destination : {dest_kind}")
+    if dest_kind == "duckdb":
+        print(f"- duckdb-file : {os.path.abspath(str(dst.get('duckdb_file')))}")
+    else:
+        print(f"- ducklake    : {dest_meta}")
+    print(f"- dataset     : {dataset}")
+    print(f"- mapping     : {os.path.abspath(args.mapping)}")
+    print(f"- sources     : {', '.join(s['name'] for s in sources)}")
 
 
 if __name__ == "__main__":

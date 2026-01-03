@@ -13,8 +13,9 @@ from utils import sanitize_table_name, get_pk_from_record, stable_pk_from_fields
 @dataclass
 class JsonCollection:
     name: str
-    path: str  # "$" or "$.items" etc
+    path: str
     pk_prefer: List[str]
+    write_disposition: Optional[str] = None
     enabled: bool = True
 
 
@@ -56,14 +57,13 @@ def _infer_pk_prefer_from_keys(keys: List[str]) -> List[str]:
     return out
 
 
-def infer_json_mapping(file_path: str, fmt: str, records_path: Optional[str] = None) -> JsonMapping:
+def infer_json_mapping(source_name: str, file_path: str, fmt: str, records_path: Optional[str] = None) -> JsonMapping:
     fmt = (fmt or "auto").lower()
     collections: Dict[str, JsonCollection] = {}
 
     if fmt == "jsonl":
-        # single stream collection
-        collections["records"] = JsonCollection(
-            name="records",
+        collections[f"{source_name}_records"] = JsonCollection(
+            name=f"{source_name}_records",
             path="$",
             pk_prefer=["id", "ID", "code", "Code", "key", "Key"],
         )
@@ -75,8 +75,8 @@ def infer_json_mapping(file_path: str, fmt: str, records_path: Optional[str] = N
 
     if records_path:
         node = _get_by_dotted_path(root, records_path)
-        collections["records"] = JsonCollection(
-            name="records",
+        collections[f"{source_name}_records"] = JsonCollection(
+            name=f"{source_name}_records",
             path=f"$.{records_path}",
             pk_prefer=["id", "ID", "code", "Code", "key", "Key"],
         )
@@ -86,7 +86,7 @@ def infer_json_mapping(file_path: str, fmt: str, records_path: Optional[str] = N
     if isinstance(root, list):
         first = next((x for x in root if isinstance(x, dict)), None)
         pk_pref = _infer_pk_prefer_from_keys(list(first.keys())) if isinstance(first, dict) else ["id", "ID", "code", "Code", "key", "Key"]
-        collections["records"] = JsonCollection(name="records", path="$", pk_prefer=pk_pref)
+        collections[f"{source_name}_records"] = JsonCollection(name=f"{source_name}_records", path="$", pk_prefer=pk_pref)
         return JsonMapping(collections=collections)
 
     # If root is dict: collections for keys that are lists of dicts
@@ -95,17 +95,17 @@ def infer_json_mapping(file_path: str, fmt: str, records_path: Optional[str] = N
             if isinstance(v, list) and v and all(isinstance(x, dict) for x in v[:50]):
                 first = v[0] if isinstance(v[0], dict) else {}
                 pk_pref = _infer_pk_prefer_from_keys(list(first.keys()))
-                collections[k] = JsonCollection(name=k, path=f"$.{k}", pk_prefer=pk_pref)
+                collections[f"{source_name}_{k}"] = JsonCollection(name=f"{source_name}_{k}", path=f"$.{k}", pk_prefer=pk_pref)
         if collections:
             return JsonMapping(collections=collections)
 
         # fallback single dict
         pk_pref = _infer_pk_prefer_from_keys(list(root.keys()))
-        collections["root"] = JsonCollection(name="root", path="$", pk_prefer=pk_pref)
+        collections[f"{source_name}_root"] = JsonCollection(name=f"{source_name}_root", path="$", pk_prefer=pk_pref)
         return JsonMapping(collections=collections)
 
     # fallback scalar
-    collections["value"] = JsonCollection(name="value", path="$", pk_prefer=[])
+    collections[f"{source_name}_value"] = JsonCollection(name=f"{source_name}_value", path="$", pk_prefer=[])
     return JsonMapping(collections=collections)
 
 
@@ -155,6 +155,7 @@ def build_json_resources(
     file_path: str,
     fmt: str,
     mapping: JsonMapping,
+    source_name: str,
     raw_table: str,
     write_disposition: str = "append",
     records_path_override: Optional[str] = None,
@@ -171,6 +172,7 @@ def build_json_resources(
                 yield {
                     "collection": cname,
                     "path": col.path,
+                    "__source_name": source_name,
                     "raw_json": json.dumps(obj, ensure_ascii=False),
                 }
 
@@ -180,19 +182,20 @@ def build_json_resources(
         if not col.enabled:
             continue
         tname = sanitize_table_name(cname, "json_data")
+        col_write_disposition = col.write_disposition or write_disposition
 
-        @dlt.resource(name=tname, write_disposition=write_disposition)
+        @dlt.resource(name=tname, write_disposition=col_write_disposition)
         def _res(col=col, cname=cname):
             for obj in iter_json_records(file_path, fmt, col, records_path_override=records_path_override):
-                # pk strategy:
-                # 1) explicit pk_fields override (hash of those)
-                # 2) prefer fields in mapping (first hit)
-                # 3) hash of full record
                 if pk_fields_override:
                     pk = stable_pk_from_fields(obj, pk_fields_override)
                 else:
                     pk = get_pk_from_record(obj, col.pk_prefer) or stable_pk_from_fields(obj, None)
-                yield to_semiflat_row(obj, pk=str(pk), add_raw_json=True)
+                row = to_semiflat_row(obj, pk=str(pk), add_raw_json=True)
+                row["__source_name"] = source_name
+                if col.path != "$":
+                    row["__json_records_path"] = col.path[2:]
+                yield row
 
         normalized_resources[cname] = _res
 
